@@ -6,6 +6,11 @@ import RAKE
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import f1_score
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import CountVectorizer
+import warnings
+
+warnings.filterwarnings('ignore')
 
 # load a pretrained phrase bert model
 model = SentenceTransformer('whaleloops/phrase-bert')
@@ -46,7 +51,7 @@ def keyword_graph(keywords):
     distHash = collections.defaultdict(float)
     vecHash = {}
     wordvecs = model.encode(keywords)
-    pca = PCA(n_components = 5)
+    pca = PCA(n_components = 4)
     pca.fit(wordvecs)
     wordvecs = pca.transform(wordvecs)
     for i in range(len(keywords)):
@@ -92,17 +97,78 @@ def load_document_phrase_from_direct_mine(datafolder):
     rake = RAKE.Rake(stop_dir)
     document_id_to_phrases = []
     phrases = set()
-    print("mining document phrases...")
+    print("mining document phrases using Rake...")
     overall_phrases = []
     for i in tqdm(range(len(lines))):
-        topwords = sorted(rake.run(lines[i]),key=lambda x:x[1],reverse=True)[:10]
+        topwords = sorted(rake.run(lines[i]),key=lambda x:x[1],reverse=True)[:5]
         for tup in topwords:
             heapq.heappush(overall_phrases,(-tup[1],tup[0]))
         res = [tup[0] for tup in topwords]
         document_id_to_phrases.append(res)
         for p in res:
             phrases.add(p)
-    return (document_id_to_phrases, list(phrases),overall_phrases)
+    # print(document_id_to_phrases)
+    return (document_id_to_phrases, list(phrases), overall_phrases)
+
+
+def mmr(doc_embedding, word_embeddings, words, top_n, diversity):
+
+    # Extract similarity within words, and between words and the document
+    word_doc_similarity = cosine_similarity(word_embeddings, doc_embedding)
+    word_similarity = cosine_similarity(word_embeddings)
+
+    # Initialize candidates and already choose best keyword/keyphras
+    keywords_idx = [np.argmax(word_doc_similarity)]
+    candidates_idx = [i for i in range(len(words)) if i != keywords_idx[0]]
+
+    for _ in range(top_n - 1):
+        # Extract similarities within candidates and
+        # between candidates and selected keywords/phrases
+        candidate_similarities = word_doc_similarity[candidates_idx, :]
+        target_similarities = np.max(word_similarity[candidates_idx][:, keywords_idx], axis=1)
+
+        # Calculate MMR
+        mmr = (1-diversity) * candidate_similarities - diversity * target_similarities.reshape(-1, 1)
+        mmr_idx = candidates_idx[np.argmax(mmr)]
+
+        # Update keywords & candidates
+        keywords_idx.append(mmr_idx)
+        candidates_idx.remove(mmr_idx)
+
+    return [words[idx] for idx in keywords_idx]
+
+def load_document_phrase_from_keybert(datafolder):
+    # TODOS load what phrase each document have?
+    filename = "data/"+datafolder+"/"+datafolder+"_train.txt"
+    with open(filename,encoding="UTF-8") as file:
+        lines = file.readlines()
+        lines = [line.rstrip().replace("-"," ").replace("/"," ") for line in lines]
+    
+    # init, load transformers
+    n_gram_range = (1, 3)
+    stop_words = "english"
+    top_n = 3
+    model = SentenceTransformer('distilbert-base-nli-mean-tokens')
+    
+    document_id_to_phrases = []
+    phrases = set()
+    print("mining document phrases using keybert + mmr...")
+    overall_phrases = []
+    for i in tqdm(range(len(lines))):
+        doc = lines[i]
+        # Extract candidate words/phrases
+        count = CountVectorizer(ngram_range=n_gram_range, stop_words=stop_words).fit([doc])
+        candidates = count.get_feature_names()
+
+        # get embeddings
+        doc_embedding = model.encode([doc])
+        candidate_embeddings = model.encode(candidates)
+        res = mmr(doc_embedding, candidate_embeddings, candidates, top_n=5, diversity=0.9)
+        document_id_to_phrases.append(res)
+        for p in res:
+            phrases.add(p)
+            
+    return (document_id_to_phrases, list(phrases), overall_phrases)
 
 # util function: load phrases from autophrase segmentation.txt file (not used due to quality issue)
 def load_document_phrase_from_segmentation(datafolder):
@@ -160,9 +226,13 @@ def phrase_dist_to_cates(phrase,vecHash,adjHash,distHash,keywords,category_to_ke
     return cate_dist
 
 # core function: classify and return labels 
-def classify(datafolder):
+def classify(datafolder,mine="keybert"):
     print("preprocessing...")
-    document_id_to_phrases,phrases,_ = load_document_phrase_from_direct_mine(datafolder)
+    if mine == "keybert":
+        document_id_to_phrases,phrases,_ = load_document_phrase_from_keybert(datafolder)
+    else:
+        document_id_to_phrases,phrases,_ = load_document_phrase_from_direct_mine(datafolder)
+
     category_to_keywords,keywords = load_keywords(datafolder)
     print("preparing keyword graph...")
     vecHash,adjHash,distHash,pca = keyword_graph(keywords)
@@ -214,10 +284,11 @@ def save_outputs(datafolder):
             f.write('\n')
 
 # testing code
-labels = classify("news")
-save_outputs("news")
-filename = "news_train_labels.txt"
+foldername = "agnews"
+labels = classify(foldername)
+save_outputs(foldername)
+filename = "data/"+foldername+"/labels.txt"
 with open(filename,encoding="UTF-8") as file:
     true_labels = file.readlines()
     true_labels = [line.rstrip() for line in true_labels]
-f1_score(true_labels[:100], labels[:100], average='micro')
+print("f1 score micro is",f1_score(true_labels[:], labels[:], average='micro'))

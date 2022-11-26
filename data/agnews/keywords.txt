@@ -1,0 +1,4 @@
+1:politics,democratic,party,elections,nation
+2:sports,athletics,match,olympics,soccer
+3:business,retail,investor,money,financial
+4:technology,information,electronics,science,software
